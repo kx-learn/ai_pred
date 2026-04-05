@@ -30,8 +30,7 @@
               <div class="query-item query-smelter">
                 <select v-model="filters.smelter" class="form-select form-select-sm">
                   <option value="">冶炼厂：全部</option>
-                  <option value="金利">金利</option>
-                  <option value="豫光">豫光</option>
+                  <option v-for="name in SMELTER_POOL" :key="name" :value="name">{{ name }}</option>
                 </select>
               </div>
               <div class="query-actions">
@@ -60,7 +59,15 @@
                     <td v-if="row.showManager" :rowspan="row.managerRowspan">{{ row.regional_manager }}</td>
                     <td>{{ row.smelter }}</td>
                     <td>{{ row.contract_no }}</td>
-                    <td v-for="(v, i) in row.values" :key="`${row.contract_no}-${i}`">{{ v }}</td>
+                    <td v-for="(cell, i) in row.cells" :key="`${row.contract_no}-${i}`">
+                      <span
+                        :class="{
+                          'cell-completed': cell.completed,
+                          'cell-dash': cell.isPlaceholder,
+                        }"
+                        >{{ cell.text }}</span
+                      >
+                    </td>
                   </tr>
                   <tr v-if="!pagedRowsWithMerge.length">
                     <td :colspan="3 + dateColumns.length" class="empty-hint">暂无符合筛选条件的数据</td>
@@ -114,11 +121,13 @@ const rows = ref<TableRow[]>([])
 const currentPage = ref(1)
 const pageSize = 10
 
+type CellDisplay = { text: string; completed: boolean; isPlaceholder?: boolean }
+
 type TableRow = {
   regional_manager: string
   smelter: string
   contract_no: string
-  values: (string | number)[]
+  cells: CellDisplay[]
 }
 
 const managerOptions = computed(() => (warehouses.value || []).map((item) => String(item)))
@@ -139,6 +148,43 @@ function buildDateList(start: string, end: string) {
 
 const dateColumns = computed(() => buildDateList(filters.value.startDate, filters.value.endDate))
 
+/** 接口：仅「出货结束」为已完成（0 或字面 已完成）；缺日期/无计划显示 —，不标已完成 */
+function toCell(v: unknown): CellDisplay {
+  if (v === undefined || v === null)
+    return { text: '—', completed: false, isPlaceholder: true }
+  if (v === '-' || v === '')
+    return { text: '—', completed: false, isPlaceholder: true }
+  if (typeof v === 'number') {
+    if (Number.isNaN(v)) return { text: '—', completed: false, isPlaceholder: true }
+    if (v === 0) return { text: '已完成', completed: true }
+    return { text: String(v), completed: false }
+  }
+  if (typeof v === 'string') {
+    const t = v.trim()
+    if (t === '' || t === '-') return { text: '—', completed: false, isPlaceholder: true }
+    if (t === '已完成') return { text: '已完成', completed: true }
+    const n = Number(t)
+    if (!Number.isNaN(n) && n === 0) return { text: '已完成', completed: true }
+    return { text: t, completed: false }
+  }
+  return { text: String(v), completed: false }
+}
+
+/** 单子完结后只在「完成后的第一天」显示已完成，后续日期不再重复写已完成 */
+function onlyFirstCompletedLabel(cells: CellDisplay[]): CellDisplay[] {
+  let seenCompleted = false
+  return cells.map((c) => {
+    if (c.completed && c.text === '已完成') {
+      if (!seenCompleted) {
+        seenCompleted = true
+        return c
+      }
+      return { text: '—', completed: false, isPlaceholder: true }
+    }
+    return c
+  })
+}
+
 function flattenPlan(plan: unknown): TableRow[] {
   const result: TableRow[] = []
   if (!plan || typeof plan !== 'object') return result
@@ -150,21 +196,104 @@ function flattenPlan(plan: unknown): TableRow[] {
       Object.entries(smelterMap as Record<string, unknown>).forEach(([smelter, dateMap]) => {
         if (!dateMap || typeof dateMap !== 'object') return
         const dm = dateMap as Record<string, unknown>
-        const values: (string | number)[] = dateColumns.value.map((d) => {
-          const v = dm[d]
-          if (v === undefined || v === null) return '-'
-          return typeof v === 'number' || typeof v === 'string' ? v : String(v)
-        })
+        const cells = onlyFirstCompletedLabel(dateColumns.value.map((d) => toCell(dm[d])))
         result.push({
           regional_manager: warehouse,
           smelter,
           contract_no: contractNo,
-          values,
+          cells,
         })
       })
     })
   })
   return result
+}
+
+const MOCK_ROW_COUNT = 20
+
+const DEFAULT_WAREHOUSES_FALLBACK = ['山东仓库', '山西仓库']
+
+/** 模拟数据轮询用；筛选下拉里同步展示，并非「仅两家冶炼厂」 */
+const SMELTER_POOL = [
+  '金利',
+  '豫光',
+  '株冶',
+  '水口山',
+  '驰宏锌锗',
+  '南方有色',
+  '中金岭南',
+  '葫芦岛锌业',
+  '东岭',
+  '白银有色',
+  '韶关冶炼',
+  '云锡',
+] as const
+
+/** 去重且保序；空则退回默认 */
+function normalizeWarehouseManagers(warehouseOptions: string[]): string[] {
+  const raw =
+    warehouseOptions.length > 0
+      ? warehouseOptions.map((s) => String(s).trim()).filter((s) => s.length > 0)
+      : [...DEFAULT_WAREHOUSES_FALLBACK]
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const m of raw) {
+    if (!seen.has(m)) {
+      seen.add(m)
+      out.push(m)
+    }
+  }
+  return out
+}
+
+/** 每个大区经理对应唯一冶炼厂；按列表顺序轮流分配，故同一冶炼厂可对应多个大区经理 */
+function buildManagerToSmelter(managers: string[]): Map<string, string> {
+  const map = new Map<string, string>()
+  managers.forEach((mgr, idx) => {
+    map.set(mgr, SMELTER_POOL[idx % SMELTER_POOL.length]!)
+  })
+  return map
+}
+
+/** 接口未返回 plan 时占位：大区经理全部来自 warehouse_options；行数不少于 20 且不少于大区经理人数 */
+function generateMockRows(dateList: string[], warehouseOptions: string[]): TableRow[] {
+  const managers = normalizeWarehouseManagers(warehouseOptions)
+  const managerToSmelter = buildManagerToSmelter(managers)
+  const targetCount = Math.max(MOCK_ROW_COUNT, managers.length)
+
+  const rows: TableRow[] = []
+  for (let i = 0; i < targetCount; i++) {
+    const regional_manager = managers[i % managers.length]!
+    const smelter = managerToSmelter.get(regional_manager)!
+    const contract_no = `DEMO_${String(i + 1).padStart(3, '0')}`
+
+    // 先排出货量；出货结束后的第一天写「已完成」，再往后只显示 —
+    const len = dateList.length
+    const cells: CellDisplay[] = []
+    if (len === 0) {
+      rows.push({ regional_manager, smelter, contract_no, cells })
+      continue
+    }
+    const truckDayCount = Math.min(len, 1 + (i % len))
+    for (let di = 0; di < len; di++) {
+      if (di < truckDayCount) {
+        const trucks = 1 + ((i + di) % 3)
+        cells.push({ text: String(trucks), completed: false })
+      } else if (di === truckDayCount) {
+        cells.push({ text: '已完成', completed: true })
+      } else {
+        cells.push({ text: '—', completed: false, isPlaceholder: true })
+      }
+    }
+    rows.push({ regional_manager, smelter, contract_no, cells })
+  }
+  return rows
+}
+
+function isPlanEmpty(plan: unknown): boolean {
+  if (plan == null) return true
+  if (typeof plan !== 'object') return true
+  return Object.keys(plan as object).length === 0
 }
 
 const filteredRows = computed(() => {
@@ -186,19 +315,23 @@ const pagedRows = computed(() => {
 
 type MergedRow = TableRow & { showManager: boolean; managerRowspan: number }
 
+/** 仅合并「相邻且大区经理相同」的行；跨页或非连续同名各画独立单元格，避免列错位 */
 const pagedRowsWithMerge = computed((): MergedRow[] => {
-  const managerCounts: Record<string, number> = {}
-  pagedRows.value.forEach((row) => {
-    managerCounts[row.regional_manager] = (managerCounts[row.regional_manager] || 0) + 1
-  })
-  const firstSeen: Record<string, number> = {}
-  return pagedRows.value.map((row, idx) => {
-    const isFirst = firstSeen[row.regional_manager] === undefined
-    if (isFirst) firstSeen[row.regional_manager] = idx
+  const list = pagedRows.value
+  return list.map((row, idx) => {
+    const prev = idx > 0 ? list[idx - 1] : null
+    const isFirstInGroup = !prev || prev.regional_manager !== row.regional_manager
+    let rowspan = 1
+    if (isFirstInGroup) {
+      for (let j = idx + 1; j < list.length; j++) {
+        if (list[j].regional_manager === row.regional_manager) rowspan++
+        else break
+      }
+    }
     return {
       ...row,
-      showManager: isFirst,
-      managerRowspan: isFirst ? managerCounts[row.regional_manager] : 0,
+      showManager: isFirstInGroup,
+      managerRowspan: isFirstInGroup ? rowspan : 0,
     }
   })
 })
@@ -264,8 +397,15 @@ async function queryTableData() {
     const data = b.data ?? body
     const dataObj = data as { warehouse_options?: string[]; plan?: unknown }
     warehouses.value = Array.isArray(dataObj?.warehouse_options) ? dataObj.warehouse_options : []
-    const plan = dataObj?.plan ?? {}
-    rows.value = flattenPlan(plan)
+    const plan = dataObj?.plan
+    if (isPlanEmpty(plan)) {
+      rows.value = generateMockRows(
+        buildDateList(filters.value.startDate, filters.value.endDate),
+        warehouses.value,
+      )
+    } else {
+      rows.value = flattenPlan(plan)
+    }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '查询失败'
     rows.value = []
@@ -360,6 +500,16 @@ function resetFilters() {
   text-align: center;
   color: #94a3b8;
   padding: 18px 12px;
+}
+
+.cell-completed {
+  color: #15803d;
+  font-weight: 600;
+}
+
+.cell-dash {
+  color: #94a3b8;
+  font-weight: normal;
 }
 
 .table-pager {

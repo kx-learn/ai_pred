@@ -11,12 +11,12 @@
           <label>仓库</label>
           <input v-model="filters.warehouse" class="filter-input" placeholder="输入仓库" />
         </div>
-        <div class="filter-item">
-          <label>预测日期范围</label>
+        <div class="filter-item date-range-item">
+          <label>预测日期范围 <span class="date-hint">(最多15天)</span></label>
           <div class="date-range">
-            <input type="date" v-model="filters.startDate" class="filter-input" />
+            <input type="date" v-model="filters.startDate" class="filter-input" @change="validateDateRange" />
             <span>至</span>
-            <input type="date" v-model="filters.endDate" class="filter-input" />
+            <input type="date" v-model="filters.endDate" class="filter-input" @change="validateDateRange" />
           </div>
         </div>
         <div class="filter-actions">
@@ -32,7 +32,30 @@
     <div class="card">
       <div class="section-title">未来送货量预测趋势</div>
       <div class="chart-container" v-if="!tableLoading && chartData.dates.length > 0">
-        <canvas ref="chartCanvas"></canvas>
+        <div class="chart-legend">
+          <span class="legend-tip">👆 点击图例可显示/隐藏对应品种</span>
+          <div class="legend-items">
+            <div 
+              v-for="(series, idx) in chartData.series" 
+              :key="series.name"
+              class="legend-item"
+              @click="toggleSeries(series.name)"
+              :title="`点击${series.visible ? '隐藏' : '显示'}${series.name}趋势线`"
+            >
+              <span 
+                class="legend-color" 
+                :style="{ backgroundColor: series.visible ? colors[idx % colors.length] : '#ccc' }"
+              ></span>
+              <span 
+                class="legend-name"
+                :style="{ textDecoration: series.visible ? 'none' : 'line-through' }"
+              >{{ series.name }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="chart-wrapper">
+          <canvas ref="chartCanvas"></canvas>
+        </div>
       </div>
       <div v-else-if="tableLoading" class="loading-placeholder">加载中...</div>
       <div v-else class="loading-placeholder">暂无数据</div>
@@ -139,7 +162,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 
 // 类型定义
 interface ForecastRecord {
@@ -150,7 +173,7 @@ interface ForecastRecord {
   predictedWeight: number
 }
 
-// 汇总行数据（按日期+大区经理+仓库）
+// 汇总行数据
 interface SummaryRow {
   date: string
   regionalManager: string
@@ -159,7 +182,10 @@ interface SummaryRow {
   details: { variety: string; weight: number }[]
 }
 
-// 模拟数据（完全参考原有风格）
+// 颜色常量
+const colors = ['#1F77B4', '#FF7F0E', '#2CA02C', '#D62728', '#9467BD', '#8C564B', '#E377C2', '#7F7F7F']
+
+// 模拟数据
 const generateMockForecastData = (): ForecastRecord[] => {
   const managers = ['张建国', '李明华', '王德发']
   const warehouses = ['北京仓库', '上海仓库', '广州仓库']
@@ -168,8 +194,7 @@ const generateMockForecastData = (): ForecastRecord[] => {
   const data: ForecastRecord[] = []
   const today = new Date()
   
-  // 生成未来15天的预测数据
-  for (let i = 0; i <= 14; i++) {
+  for (let i = 0; i <= 30; i++) {
     const date = new Date()
     date.setDate(today.getDate() + i)
     const dateStr = date.toISOString().slice(0, 10)
@@ -201,9 +226,11 @@ const ALL_FORECAST_DATA = generateMockForecastData()
 
 // 状态
 const tableLoading = ref(false)
-const errorMessage = ref('')
 const rows = ref<SummaryRow[]>([])
 const chartCanvas = ref<HTMLCanvasElement>()
+
+// 图例开关状态
+const seriesVisibility = ref<Map<string, boolean>>(new Map())
 
 // 筛选条件
 const todayStr = new Date().toISOString().slice(0, 10)
@@ -219,6 +246,23 @@ const filters = ref({
   startDate: todayStr,
   endDate: getFutureDate(14)
 })
+
+// 验证日期范围（最多15天）
+function validateDateRange() {
+  const start = new Date(filters.value.startDate)
+  const end = new Date(filters.value.endDate)
+  const days = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24))
+  
+  if (days > 14) {
+    alert('日期范围最多可选15天（含当天）')
+    filters.value.endDate = getFutureDate(14)
+  }
+  if (start > end) {
+    alert('开始日期不能晚于结束日期')
+    filters.value.startDate = todayStr
+    filters.value.endDate = getFutureDate(14)
+  }
+}
 
 // 分页
 const currentPage = ref(1)
@@ -249,7 +293,6 @@ const chartData = computed(() => {
     if (!dateMap.has(item.date)) {
       dateMap.set(item.date, new Map())
     }
-    // 按品种汇总用于图表
     item.details.forEach(detail => {
       const varietyMap = dateMap.get(item.date)!
       varietyMap.set(detail.variety, (varietyMap.get(detail.variety) || 0) + detail.weight)
@@ -257,16 +300,24 @@ const chartData = computed(() => {
   })
   
   const dates = Array.from(dateMap.keys()).sort()
-  const varieties = ['电解铜', '铝锭', '锌锭']
-  const series = varieties.map(variety => ({
+  const allVarieties = ['电解铜', '铝锭', '锌锭']
+  
+  allVarieties.forEach(variety => {
+    if (!seriesVisibility.value.has(variety)) {
+      seriesVisibility.value.set(variety, true)
+    }
+  })
+  
+  const series = allVarieties.map(variety => ({
     name: variety,
+    visible: seriesVisibility.value.get(variety) ?? true,
     data: dates.map(date => dateMap.get(date)?.get(variety) || 0)
   }))
   
-  return { dates, varieties, series }
+  return { dates, series }
 })
 
-// 汇总数据（按日期+大区经理+仓库）
+// 汇总数据
 const aggregateData = (data: ForecastRecord[]): SummaryRow[] => {
   const map = new Map<string, SummaryRow>()
   
@@ -299,9 +350,7 @@ const aggregateData = (data: ForecastRecord[]): SummaryRow[] => {
 // 查询预测数据
 async function queryForecastData() {
   tableLoading.value = true
-  errorMessage.value = ''
   try {
-    await Promise.resolve()
     const { startDate, endDate, regionalManager, warehouse } = filters.value
     
     const filtered = ALL_FORECAST_DATA.filter((r) => {
@@ -313,85 +362,24 @@ async function queryForecastData() {
     })
     
     rows.value = aggregateData(filtered)
-    setTimeout(() => drawChart(), 100)
+    // 等待 DOM 更新后绘制图表
+    setTimeout(() => drawChart(), 50)
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '查询失败'
+    console.error('查询失败', error)
     rows.value = []
   } finally {
     tableLoading.value = false
   }
 }
 
-function handleQuery() {
-  currentPage.value = 1
-  queryForecastData()
+// 图例开关
+function toggleSeries(seriesName: string) {
+  const current = seriesVisibility.value.get(seriesName) ?? true
+  seriesVisibility.value.set(seriesName, !current)
+  drawChart()
 }
 
-function handleReset() {
-  filters.value = {
-    regionalManager: '',
-    warehouse: '',
-    startDate: todayStr,
-    endDate: getFutureDate(14)
-  }
-  queryForecastData()
-}
-
-function prevPage() { if (currentPage.value > 1) currentPage.value-- }
-function nextPage() { if (currentPage.value < totalPages.value) currentPage.value++ }
-
-// 打开详情弹窗
-function openDetailModal(row: SummaryRow) {
-  modalTitle.value = `${row.date} - ${row.regionalManager} - ${row.warehouse} 品种明细`
-  modalDetails.value = [...row.details]
-  modalCurrentPage.value = 1
-  modalVisible.value = true
-}
-
-function closeModal() {
-  modalVisible.value = false
-  modalDetails.value = []
-}
-
-// 导出主表格Excel
-function exportExcel() {
-  const headers = ['预测日期', '大区经理', '仓库', '预测重量(吨)']
-  const rowsData = rows.value.map(item => [
-    item.date,
-    item.regionalManager,
-    item.warehouse,
-    item.totalWeight
-  ])
-  
-  const csvContent = [headers, ...rowsData].map(row => row.join(',')).join('\n')
-  const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' })
-  const link = document.createElement('a')
-  const timestamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)
-  link.href = URL.createObjectURL(blob)
-  link.download = `送货量预测_${timestamp}.csv`
-  link.click()
-  URL.revokeObjectURL(link.href)
-}
-
-// 导出弹窗Excel
-function exportModalExcel() {
-  const headers = ['品种', '预测重量(吨)']
-  const rowsData = modalDetails.value.map(item => [
-    item.variety,
-    item.weight
-  ])
-  
-  const csvContent = [headers, ...rowsData].map(row => row.join(',')).join('\n')
-  const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' })
-  const link = document.createElement('a')
-  const timestamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)
-  link.href = URL.createObjectURL(blob)
-  link.download = `${modalTitle.value}_${timestamp}.csv`
-  link.click()
-  URL.revokeObjectURL(link.href)
-}
-
-// 绘制图表
+// 绘制图表（动态 X 轴，根据日期数量自动调整）
 function drawChart() {
   if (!chartCanvas.value) return
   
@@ -401,19 +389,26 @@ function drawChart() {
   const { dates, series } = chartData.value
   if (dates.length === 0) return
   
-  const width = chartCanvas.value.clientWidth
+  // 获取容器实际宽度
+  const container = chartCanvas.value.parentElement
+  const containerWidth = container?.clientWidth || 800
+  const width = Math.max(containerWidth, 600)  // 最小600px，根据内容自动扩展
   const height = 400
+  
   chartCanvas.value.width = width
   chartCanvas.value.height = height
   
+  // 计算可见系列的最大值
   let maxValue = 0
   series.forEach(s => {
-    const max = Math.max(...s.data)
-    maxValue = Math.max(maxValue, max)
+    if (s.visible) {
+      const max = Math.max(...s.data)
+      maxValue = Math.max(maxValue, max)
+    }
   })
-  maxValue = Math.ceil(maxValue * 1.1)
+  maxValue = Math.ceil(maxValue * 1.1) || 100
   
-  const margin = { top: 20, right: 80, bottom: 40, left: 60 }
+  const margin = { top: 20, right: 80, bottom: 50, left: 60 }
   const chartWidth = width - margin.left - margin.right
   const chartHeight = height - margin.top - margin.bottom
   
@@ -444,18 +439,34 @@ function drawChart() {
     ctx.fillText(Math.round(value).toString(), -35, y + 3)
   }
   
-  // X轴刻度
+  // X轴 - 动态计算步长和标签间距
   const xStep = dates.length > 1 ? chartWidth / (dates.length - 1) : chartWidth
+  // 根据日期数量动态调整标签显示密度
+  const maxLabels = Math.floor(chartWidth / 70)  // 每70px显示一个标签
+  const labelStep = Math.max(1, Math.ceil(dates.length / maxLabels))
+  
   dates.forEach((date, i) => {
     const x = i * xStep
-    ctx.fillStyle = '#666'
-    ctx.font = '11px Arial'
-    ctx.fillText(date.slice(5), x - 15, chartHeight + 18)
+    // 绘制垂直网格线
+    ctx.beginPath()
+    ctx.moveTo(x, 0)
+    ctx.lineTo(x, chartHeight)
+    ctx.strokeStyle = '#f0f0f0'
+    ctx.stroke()
+    
+    // 只显示部分标签，避免重叠
+    if (i % labelStep === 0 || i === dates.length - 1) {
+      ctx.fillStyle = '#666'
+      ctx.font = '11px Arial'
+      const dateLabel = date.slice(5)  // 只显示 MM-DD
+      ctx.fillText(dateLabel, x - 20, chartHeight + 20)
+    }
   })
   
-  const colors = ['#1F77B4', '#FF7F0E', '#2CA02C', '#D62728', '#9467BD']
-  
+  // 绘制折线
   series.forEach((s, idx) => {
+    if (!s.visible) return
+    
     const color = colors[idx % colors.length]
     ctx.beginPath()
     
@@ -475,6 +486,7 @@ function drawChart() {
     ctx.lineWidth = 2
     ctx.stroke()
     
+    // 数据点
     s.data.forEach((value, i) => {
       const x = i * xStep
       const y = chartHeight - (value / maxValue) * chartHeight
@@ -485,19 +497,7 @@ function drawChart() {
     })
   })
   
-  // 图例
-  let legendX = chartWidth + 10
-  let legendY = 10
-  series.forEach((s, idx) => {
-    ctx.fillStyle = colors[idx % colors.length]
-    ctx.fillRect(legendX, legendY, 12, 12)
-    ctx.fillStyle = '#333'
-    ctx.font = '12px Arial'
-    ctx.fillText(s.name, legendX + 18, legendY + 10)
-    legendY += 20
-  })
-  
-  // 标签
+  // Y轴标签
   ctx.save()
   ctx.translate(-40, chartHeight / 2)
   ctx.rotate(-Math.PI / 2)
@@ -506,13 +506,86 @@ function drawChart() {
   ctx.fillText('重量(吨)', -20, 5)
   ctx.restore()
   
+  // X轴标签
   ctx.fillStyle = '#666'
   ctx.font = '12px Arial'
-  ctx.fillText('日期', chartWidth / 2 - 20, chartHeight + 35)
+  ctx.fillText('日期', chartWidth / 2 - 20, chartHeight + 40)
   
   ctx.restore()
 }
 
+function handleQuery() {
+  currentPage.value = 1
+  queryForecastData()
+}
+
+function handleReset() {
+  filters.value = {
+    regionalManager: '',
+    warehouse: '',
+    startDate: todayStr,
+    endDate: getFutureDate(14)
+  }
+  queryForecastData()
+}
+
+function prevPage() { if (currentPage.value > 1) currentPage.value-- }
+function nextPage() { if (currentPage.value < totalPages.value) currentPage.value++ }
+
+function openDetailModal(row: SummaryRow) {
+  modalTitle.value = `${row.date} - ${row.regionalManager} - ${row.warehouse} 品种明细`
+  modalDetails.value = [...row.details]
+  modalCurrentPage.value = 1
+  modalVisible.value = true
+}
+
+function closeModal() {
+  modalVisible.value = false
+  modalDetails.value = []
+}
+
+function exportExcel() {
+  const headers = ['预测日期', '大区经理', '仓库', '预测重量(吨)']
+  const rowsData = rows.value.map(item => [
+    item.date,
+    item.regionalManager,
+    item.warehouse,
+    item.totalWeight
+  ])
+  
+  const csvContent = [headers, ...rowsData].map(row => row.join(',')).join('\n')
+  const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' })
+  const link = document.createElement('a')
+  const timestamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)
+  link.href = URL.createObjectURL(blob)
+  link.download = `送货量预测_${timestamp}.csv`
+  link.click()
+  URL.revokeObjectURL(link.href)
+}
+
+function exportModalExcel() {
+  const headers = ['品种', '预测重量(吨)']
+  const rowsData = modalDetails.value.map(item => [
+    item.variety,
+    item.weight
+  ])
+  
+  const csvContent = [headers, ...rowsData].map(row => row.join(',')).join('\n')
+  const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' })
+  const link = document.createElement('a')
+  const timestamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)
+  link.href = URL.createObjectURL(blob)
+  link.download = `${modalTitle.value}_${timestamp}.csv`
+  link.click()
+  URL.revokeObjectURL(link.href)
+}
+
+// 监听 rows 变化重新绘制图表
+watch(() => rows.value, () => {
+  setTimeout(drawChart, 50)
+}, { deep: true })
+
+// 监听窗口大小变化
 const handleResize = () => {
   setTimeout(drawChart, 100)
 }
@@ -530,23 +603,132 @@ onUnmounted(() => {
 <style scoped>
 .forecast-page { width: 100%; }
 .card { background: white; border-radius: 8px; padding: 16px 20px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); }
-.filter-row { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; }
-.filter-item { display: flex; flex-direction: column; gap: 6px; min-width: 160px; }
-.filter-item label { font-size: 13px; font-weight: 500; color: #606266; }
-.date-range { display: flex; gap: 8px; align-items: center; }
-.filter-input { padding: 6px 10px; border: 1px solid #E5E9F2; border-radius: 4px; font-size: 13px; width: 130px; }
-.filter-actions { display: flex; gap: 10px; }
-.btn { padding: 6px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.2s; }
-.btn-primary { background-color: #4A7A9C; color: white; }
+
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-end;
+}
+
+.filter-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 160px;
+}
+
+.filter-item label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #606266;
+  white-space: nowrap;
+}
+
+.date-range-item {
+  min-width: 280px;
+}
+
+.date-hint {
+  font-size: 11px;
+  color: #909399;
+  font-weight: normal;
+}
+
+.date-range {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.filter-input {
+  padding: 6px 10px;
+  border: 1px solid #E5E9F2;
+  border-radius: 4px;
+  font-size: 13px;
+  width: 130px;
+}
+
+.filter-actions {
+  display: flex;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.btn {
+  padding: 6px 16px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.btn-primary {
+  background-color: #4A7A9C;
+  color: white;
+}
 .btn-primary:hover { background-color: #5a8aac; }
-.btn-secondary { background-color: #F5F7FA; color: #606266; border: 1px solid #E5E9F2; }
+
+.btn-secondary {
+  background-color: #F5F7FA;
+  color: #606266;
+  border: 1px solid #E5E9F2;
+}
 .btn-secondary:hover { background-color: #E5E9F2; }
+
 .btn-sm { padding: 4px 12px; font-size: 12px; }
 .btn-view { background: none; border: 1px solid #4A7A9C; color: #4A7A9C; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
 .btn-view:hover { background-color: #4A7A9C; color: white; }
+
 .section-title { font-size: 15px; font-weight: 600; color: #1F2D3D; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #E5E9F2; }
-.chart-container { min-height: 400px; }
+
+.chart-container { min-height: 450px; }
+.chart-wrapper { width: 100%; overflow-x: auto; }
+.chart-wrapper canvas { min-width: 600px; width: 100%; height: auto; }
+
+.chart-legend { 
+  display: flex; 
+  justify-content: space-between; 
+  align-items: center; 
+  flex-wrap: wrap;
+  margin-bottom: 16px; 
+  padding-bottom: 12px; 
+  border-bottom: 1px solid #E5E9F2;
+}
+
+.legend-tip {
+  font-size: 12px;
+  color: #909399;
+  background: #F5F7FA;
+  padding: 4px 12px;
+  border-radius: 16px;
+}
+
+.legend-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: background-color 0.2s;
+}
+.legend-item:hover { background-color: #F5F7FA; }
+
+.legend-color { width: 16px; height: 16px; border-radius: 3px; }
+.legend-name { color: #333; }
+
 .loading-placeholder { min-height: 400px; display: flex; align-items: center; justify-content: center; color: #909399; }
+
 .table-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .table-wrapper { overflow-x: auto; border: 1px solid #E5E9F2; border-radius: 4px; }
 .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -554,6 +736,7 @@ onUnmounted(() => {
 .data-table th { background-color: #E8F0F8; font-weight: 600; color: #2c3e50; }
 .data-table tbody tr:hover { background-color: #F5F7FA; }
 .empty-data { text-align: center; padding: 40px; color: #909399; }
+
 .pagination { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 16px; }
 .pagination button { padding: 4px 12px; border: 1px solid #E5E9F2; background: white; border-radius: 4px; cursor: pointer; }
 .pagination button:disabled { opacity: 0.5; cursor: not-allowed; }
